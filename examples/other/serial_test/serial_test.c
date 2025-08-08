@@ -21,7 +21,7 @@ void uart_echo_task(void)
     // 1. Configure the UART peripheral
     struct pi_uart_conf conf;
     pi_uart_conf_init(&conf);
-    conf.uart_itf = UART_INTERFACE;
+    conf.uart_id = UART_INTERFACE;
     conf.baudrate_bps = UART_BAUDRATE;
     conf.enable_rx = 1;
     conf.enable_tx = 1;
