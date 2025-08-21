@@ -1,33 +1,39 @@
 #include "pmsis.h"
 #include "stdio.h"
 
-/*
- * The FIX: Declare the MAVLink packet array as a global variable.
- * This puts it in permanent, static memory, preventing the stack-related
- * issues we saw in the previous tests.
-*/
-uint8_t mavlink_heartbeat[] = {
-    0xFE, // Start of frame
-    0x09, // Payload length
-    0x00, // Packet sequence
-    0x01, // System ID
-    0x01, // Component ID
-    0x00, // Message ID (HEARTBEAT)
-    0x00, 0x00, 0x00, 0x00, // custom_mode
-    0x13, // type (MAV_TYPE_QUADROTOR)
-    0x08, // autopilot (MAV_AUTOPILOT_ARDUPILOTMEGA)
-    0x03, // base_mode
-    0x04, // system_status
-    0x03, // mavlink_version
-    0x4B, // Checksum A
-    0x17  // Checksum B
-};
+// 1. Include the MAVLink header
+#include "ardupilotmega/mavlink.h"
 
-void test_mavlink_uart(void)
+// --- Global variables to avoid stack issues ---
+
+// 2. Buffer to hold the serialized MAVLink message before sending
+uint8_t send_buffer[MAVLINK_MAX_PACKET_LEN];
+
+// 3. Keep track of the MAVLink packet sequence number
+uint8_t mavlink_sequence = 0;
+
+// UART device handle
+struct pi_device uart_device;
+
+
+/**
+ * @brief Sends a MAVLink message over the UART port.
+ * @param msg A pointer to the MAVLink message to be sent.
+ */
+void send_mavlink_message(const mavlink_message_t *msg)
 {
-    printf("Entering main controller (MAVLink test)...\n");
+    // Serialize the MAVLink message into the global send_buffer
+    uint16_t len = mavlink_msg_to_send_buffer(send_buffer, msg);
 
-    struct pi_device uart_device;
+    // Send the serialized bytes over UART
+    pi_uart_write(&uart_device, send_buffer, len);
+}
+
+
+void test_mavlink_api(void)
+{
+    printf("Entering main controller (MAVLink API Test)...\n");
+
     struct pi_uart_conf conf;
 
     pi_uart_conf_init(&conf);
@@ -42,25 +48,42 @@ void test_mavlink_uart(void)
         pmsis_exit(-1);
     }
 
-    printf("UART opened. Sending MAVLink heartbeats...\n");
+    printf("UART opened successfully. Starting MAVLink heartbeats...\n");
 
     while(1)
     {
-        // Write the entire global mavlink_heartbeat array.
-        pi_uart_write(&uart_device, mavlink_heartbeat, sizeof(mavlink_heartbeat));
+        // --- Create and send the HEARTBEAT message ---
+        mavlink_message_t msg;
+        mavlink_heartbeat_t heartbeat;
 
-        // Increment the sequence number for the next packet.
-        mavlink_heartbeat[2]++;
+        // Set heartbeat properties
+        heartbeat.type = MAV_TYPE_QUADROTOR;
+        heartbeat.autopilot = MAV_AUTOPILOT_GENERIC;
+        heartbeat.base_mode = 0;
+        heartbeat.custom_mode = 0;
+        heartbeat.system_status = MAV_STATE_ACTIVE;
 
-        // Delay for 1 second.
+        // Pack the heartbeat message
+        mavlink_msg_heartbeat_encode(
+            1, // System ID
+            1, // Component ID
+            &msg,
+            &heartbeat
+        );
+
+        // Send the message over UART
+        send_mavlink_message(&msg);
+
+        // Delay for 1 second
         pi_time_wait_us(1000 * 1000);
     }
 
     pmsis_exit(0);
 }
 
+
 int main(void)
 {
-    printf("\n\n\t *** PMSIS MAVLink UART Test ***\n\n");
-    return pmsis_kickoff((void *) test_mavlink_uart);
+    printf("\n\n\t *** PMSIS MAVLink API UART Test ***\n\n");
+    return pmsis_kickoff((void *) test_mavlink_api);
 }
