@@ -1,0 +1,101 @@
+#include "pmsis.h"
+#include "bsp/bsp.h"
+#include "cpx.h"
+#include "wifi.h" // Include the WiFi control header
+
+// --- Global Variables ---
+static CPXPacket_t txp; // Packet for sending CPX commands
+
+/**
+ * @brief Configures the ESP32 to start its own WiFi Access Point.
+ * This is adapted from the wifi-img-streamer example.
+ */
+void setupWiFi(void) {
+    static char ssid[] = "AideckDebugAP";
+    cpxPrintToConsole(LOG_TO_WIFI, "Setting up WiFi AP with SSID: %s\n", ssid);
+
+    // Initialize a packet for sending WiFi control commands
+    cpxInitRoute(CPX_T_GAP8, CPX_T_ESP32, CPX_F_WIFI_CTRL, &txp.route);
+
+    WiFiCTRLPacket_t *wifiCtrl = (WiFiCTRLPacket_t*) txp.data;
+
+    // Command to set the SSID
+    wifiCtrl->cmd = WIFI_CTRL_SET_SSID;
+    memcpy(wifiCtrl->data, ssid, sizeof(ssid));
+    txp.dataLength = sizeof(ssid) + sizeof(wifiCtrl->cmd);
+    cpxSendPacketBlocking(&txp);
+
+    // Command to connect (i.e., start the Access Point)
+    wifiCtrl->cmd = WIFI_CTRL_WIFI_CONNECT;
+    wifiCtrl->data[0] = 0x01; // 0x01 indicates AP mode
+    txp.dataLength = 2;
+    cpxSendPacketBlocking(&txp);
+
+    cpxPrintToConsole(LOG_TO_WIFI, "WiFi AP setup commands sent.\n");
+}
+
+/**
+ * @brief Task to send periodic debug messages over STM32.
+ */
+void uart_echo_task(void *parameters) {
+    const uint8_t manual_mavlink_packet[] = {
+    0xFD, 0x09, 0x00, 0x00, 0x00, 0x01, 0xC5, 0x00,
+    0x00, 0x0C, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00,
+    0x00, 0x00, 0x03, 0x51, 0x0C
+    };
+
+    const uint16_t packet_len = sizeof(manual_mavlink_packet);
+
+    while (1) {
+        // Send the CPX packet
+        cpxPrintBytesToConsole(LOG_TO_CRTP, manual_mavlink_packet, packet_len);
+
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
+    }
+}
+
+/**
+ * @brief Task to send periodic debug messages over WiFi.
+ */
+void wifi_debug_task(void *parameters) {
+    while(1) {
+        cpxPrintToConsole(LOG_TO_WIFI, "GAP8 is alive...\n");
+        vTaskDelay(2000 / portTICK_PERIOD_MS);
+    }
+}
+
+/**
+ * @brief The main entry point for the application.
+ */
+void start_main_application(void *parameters) {
+    cpxInit();
+
+    // Call the function to set up the WiFi AP
+    #ifdef SETUP_WIFI_AP
+        setupWiFi();
+    #endif
+
+    cpxPrintToConsole(LOG_TO_WIFI, "-- GAP8 Serial & WiFi Test --\n");
+
+    BaseType_t xTask;
+    xTask = xTaskCreate(uart_echo_task, "uart_echo_task", configMINIMAL_STACK_SIZE * 4, NULL, tskIDLE_PRIORITY + 1, NULL);
+    if (xTask != pdPASS) {
+        cpxPrintToConsole(LOG_TO_WIFI, "FATAL: UART echo task creation failed!\n");
+    }
+
+    xTask = xTaskCreate(wifi_debug_task, "wifi_debug_task", configMINIMAL_STACK_SIZE * 2, NULL, tskIDLE_PRIORITY + 1, NULL);
+    if (xTask != pdPASS) {
+        cpxPrintToConsole(LOG_TO_WIFI, "FATAL: WiFi debug task creation failed!\n");
+    }
+
+    while(1) {
+        pi_yield();
+    }
+}
+
+int main(void) {
+    pi_bsp_init();
+    pi_freq_set(PI_FREQ_DOMAIN_FC, 250000000);
+    __pi_pmu_voltage_set(PI_PMU_DOMAIN_FC, 1200);
+    return pmsis_kickoff((void *)start_main_application);
+}
