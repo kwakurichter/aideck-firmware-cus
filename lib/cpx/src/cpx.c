@@ -119,6 +119,25 @@ void cpxPrintToConsole(CPXConsoleTarget_t target, const char * fmt, ...) {
   }
 }
 
+void cpxSendRawData(const CPXTarget_t destination, const CPXFunction_t function, const uint8_t * data, const uint16_t length) {
+  // Take the semaphore to ensure exclusive access to the transmitter
+  if( xSemaphoreTake( xSemaphore, ( TickType_t )portMAX_DELAY) == pdTRUE )
+  {
+    txpPacked.wireLength = length + CPX_HEADER_SIZE;
+    txpPacked.route.destination = destination;
+    txpPacked.route.source = CPX_T_GAP8; // Source is always GAP8
+    txpPacked.route.function = function;
+    txpPacked.route.version = CPX_VERSION;
+    txpPacked.route.lastPacket = true;
+    memcpy(txpPacked.data, data, length);
+
+    com_write((packet_t*)&txpPacked);
+    
+    // Release the semaphore for other tasks
+    xSemaphoreGive( xSemaphore );
+  }
+}
+
 void cpxInitRoute(const CPXTarget_t source, const CPXTarget_t destination, const CPXFunction_t function, CPXRouting_t* route) {
     route->source = source;
     route->destination = destination;

@@ -27,6 +27,8 @@
 
 #include "com.h"
 
+extern SemaphoreHandle_t xSemaphore;
+
 #define CPX_VERSION (0)
 #define CPX_HEADER_SIZE (2)
 
@@ -44,6 +46,7 @@ typedef enum {
   CPX_F_CRTP = 3,
   CPX_F_WIFI_CTRL = 4,
   CPX_F_APP = 5,
+  CPX_F_MAVLINK_DOWNLINK = 7,
   CPX_F_TEST = 0x0E,
   CPX_F_BOOTLOADER = 0x0F,
   CPX_F_LAST // NEEDS TO BE LAST
@@ -116,6 +119,17 @@ void cpxSendPacketBlocking(const CPXPacket_t * packet);
  * @return false if package could not be queued for sending within timeout
  */
 bool cpxSendPacket(const CPXPacket_t * packet, uint32_t timeout);
+
+/**
+ * @brief Send a raw data buffer through CPX in a thread-safe manner.
+ *
+ * @param destination The destination target for the packet.
+ * @param function The CPX function channel to use.
+ * @param data Pointer to the data buffer to send.
+ * @param length The number of bytes to send from the buffer.
+ */
+void cpxSendRawData(const CPXTarget_t destination, const CPXFunction_t function, const uint8_t * data, const uint16_t length);
+
 
 /**
  * @brief Initialize CPX routing data.
