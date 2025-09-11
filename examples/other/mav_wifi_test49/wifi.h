@@ -12,7 +12,6 @@ typedef enum {
   WIFI_CTRL_STATUS_CLIENT_CONNECTED = 0x32,
 
   WIFI_CTRL_USER_COMMAND            = 0x40,
-  WIFI_MAV_DATA                     = 0x41,
 } __attribute__((packed)) WiFiCTRLType;
 
 typedef struct {
