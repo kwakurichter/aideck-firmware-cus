@@ -55,6 +55,7 @@ static volatile bool is_mission_start = false;
 static volatile bool is_mission_reset = false;
 static volatile bool is_mission_terminate = false;
 static volatile bool is_origin_set = false;
+static volatile bool is_hover_origin_set = false;
 static volatile bool is_voodoo_start = false;
 static volatile bool g_fc_connected = false;
 static volatile bool g_pos_stream_active = false;
@@ -127,18 +128,18 @@ ControllerState_t g_controller_state = {0}; // A single, shared structure to hol
 
 // Define the states for your mission
 typedef enum {
-    MISSION_WAIT_FOR_LOITER,
+    MISSION_WAIT_FOR_GUIDED,
     MISSION_WAIT_FOR_ALTHOLD,
     MISSION_WAIT_FOR_COMMAND,
     MISSION_ARM,
     MISSION_TAKEOFF,
     MISSION_HOVER,
     VOODOO_CONTROL,
-    MISSION_LOITER_LAND,
+    MISSION_GUIDED_LAND,
     MISSION_COMMAND_LAND,
     MISSION_WAIT_FOR_LAND,
     MISSION_DISARM,
-    MISSION_DONE    
+    MISSION_DONE
 } MissionState_t;
 
 volatile MissionState_t g_mission_state = MISSION_WAIT_FOR_COMMAND;
@@ -146,14 +147,14 @@ volatile MissionState_t g_mission_state = MISSION_WAIT_FOR_COMMAND;
 // Helper function to convert mission state enum to a string for printing
 const char* mission_state_to_string(MissionState_t state) {
     switch (state) {
-        case MISSION_WAIT_FOR_LOITER:       return "WAIT_FOR_LOITER";
+        case MISSION_WAIT_FOR_GUIDED:       return "WAIT_FOR_GUIDED";
         case MISSION_WAIT_FOR_ALTHOLD:      return "WAIT_FOR_ALTHOLD";
         case MISSION_WAIT_FOR_COMMAND:      return "WAIT_FOR_COMMAND"; 
         case MISSION_ARM:                   return "ARM_VEHICLE";
         case MISSION_TAKEOFF:               return "COMMAND_TAKEOFF";
         case MISSION_HOVER:                 return "HOVER";
         case VOODOO_CONTROL:                return "VOODOO";
-        case MISSION_LOITER_LAND:           return "LOITER_LAND";
+        case MISSION_GUIDED_LAND:           return "GUIDED_LAND";
         case MISSION_COMMAND_LAND:          return "COMMAND_LAND";
         case MISSION_WAIT_FOR_LAND:         return "WAIT_FOR_LAND";
         case MISSION_DISARM:                return "DISARM";
@@ -1168,7 +1169,7 @@ void mavlink_disarm_vehicle() {
  * @param y_east  Target position East in meters.
  * @param z_down  Target position Down in meters (negative for altitude).
  */
-void mavlink_set_local_target(float x_north, float y_east, float z_down) {
+void mavlink_set_local_pos_target(float x_north, float y_east, float z_down) {
     mavlink_message_t msg;
     // printf("-> Setting local NED target to N:%.1f, E:%.1f, D:%.1f\n", x_north, y_east, z_down);
     //cpxPrintToConsole(LOG_TO_WIFI, "-> Setting local NED target to N:%.1f, E:%.1f, D:%.1f\n", x_north, y_east, z_down);
@@ -1193,6 +1194,106 @@ void mavlink_set_local_target(float x_north, float y_east, float z_down) {
         0, 0, 0, // velocity (ignored)
         0, 0, 0, // acceleration (ignored)
         0, 0     // yaw & yaw rate (ignored)
+    );
+    send_mavlink_message(&msg);
+}
+
+/**
+ * @brief Commands the vehicle with a velocity target in the local NED frame.
+ * @param vx_north Velocity North in m/s.
+ * @param vy_east  Velocity East in m/s.
+ * @param vz_down  Velocity Down in m/s (positive = descend).
+ */
+void mavlink_set_local_vel_target(float vx_north, float vy_east, float vz_down) {
+    mavlink_message_t msg;
+
+    uint16_t type_mask = POSITION_TARGET_TYPEMASK_X_IGNORE |
+                         POSITION_TARGET_TYPEMASK_Y_IGNORE |
+                         POSITION_TARGET_TYPEMASK_Z_IGNORE |
+                         POSITION_TARGET_TYPEMASK_AX_IGNORE |
+                         POSITION_TARGET_TYPEMASK_AY_IGNORE |
+                         POSITION_TARGET_TYPEMASK_AZ_IGNORE |
+                         POSITION_TARGET_TYPEMASK_YAW_IGNORE |
+                         POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE;
+
+    mavlink_msg_set_position_target_local_ned_pack(
+        GAP8_SYSTEM_ID, GAP8_COMPONENT_ID, &msg,
+        0,
+        1, 1,
+        MAV_FRAME_LOCAL_NED,
+        type_mask,
+        0, 0, 0,
+        vx_north, vy_east, vz_down,
+        0, 0, 0,
+        0, 0
+    );
+    send_mavlink_message(&msg);
+}
+
+/**
+ * @brief Commands the vehicle to fly in voodoo.
+ * @param vx_north Velocity North in m/s.
+ * @param vy_east  Velocity East in m/s.
+ * @param vz_down  Velocity Down in m/s (positive = descend).
+ * @param yaw      Target yaw angle in rads.
+ */
+void mavlink_set_voodoo(float vx_north, float vy_east, float vz_down, float yaw) {
+    mavlink_message_t msg;
+
+    // Bitmask tells the drone to only use the pos, vel, and yaw fields and ignore others.
+    uint16_t type_mask = POSITION_TARGET_TYPEMASK_X_IGNORE |
+                           POSITION_TARGET_TYPEMASK_Y_IGNORE  |
+                           POSITION_TARGET_TYPEMASK_Z_IGNORE  |
+                           POSITION_TARGET_TYPEMASK_AX_IGNORE |
+                           POSITION_TARGET_TYPEMASK_AY_IGNORE |
+                           POSITION_TARGET_TYPEMASK_AZ_IGNORE |
+                           POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE;
+
+    mavlink_msg_set_position_target_local_ned_pack(
+        GAP8_SYSTEM_ID, GAP8_COMPONENT_ID, &msg,
+        0, // time_boot_ms (0 for now)
+        1, 1, // target_system, target_component
+        MAV_FRAME_LOCAL_NED, // Use the local frame of reference
+        type_mask,
+        0, 0, 0, // position x,y,z (ignored)
+        vx_north, vy_east, vz_down,
+        0, 0, 0, // acceleration (ignored)
+        yaw,
+        0     // yaw rate (ignored)
+    );
+    send_mavlink_message(&msg);
+}
+
+/**
+ * @brief Commands the vehicle to fly to a target in the local NED frame.
+ * @param x_north  Target position North in meters.
+ * @param y_east   Target position East in meters.
+ * @param z_down   Target position Down in meters (negative for altitude).
+ * @param vx_north Velocity North in m/s.
+ * @param vy_east  Velocity East in m/s.
+ * @param vz_down  Velocity Down in m/s (positive = descend).
+ * @param yaw      Target yaw angle in rads.
+ */
+void mavlink_set_local_target(float x_north, float y_east, float z_down, float vx_north, float vy_east, float vz_down, float yaw) {
+    mavlink_message_t msg;
+
+    // Bitmask tells the drone to only use the pos, vel, and yaw fields and ignore others.
+    uint16_t type_mask = POSITION_TARGET_TYPEMASK_AX_IGNORE |
+                           POSITION_TARGET_TYPEMASK_AY_IGNORE |
+                           POSITION_TARGET_TYPEMASK_AZ_IGNORE |
+                           POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE;
+
+    mavlink_msg_set_position_target_local_ned_pack(
+        GAP8_SYSTEM_ID, GAP8_COMPONENT_ID, &msg,
+        0, // time_boot_ms (0 for now)
+        1, 1, // target_system, target_component
+        MAV_FRAME_LOCAL_NED, // Use the local frame of reference
+        type_mask,
+        x_north, y_east, z_down,
+        vx_north, vy_east, vz_down,
+        0, 0, 0, // acceleration (ignored)
+        yaw,
+        0     // yaw rate (ignored)
     );
     send_mavlink_message(&msg);
 }
@@ -1371,8 +1472,11 @@ void autonomous_mission_task(void *parameters) {
     const int TAKEOFF_RAMP_TICKS = (TAKEOFF_RAMP_MS / MISSION_DT_MS);  // 100 ticks @ 50 Hz
     const int THR_TKOFF_START = 1450;
     const int THR_TKOFF_END   = 1550;
-    const int LOITER_TIME_MS = 1000;
-    const int LOITER_TICKS = (LOITER_TIME_MS / MISSION_DT_MS);
+    const int GUIDED_TIME_MS = 1000;
+    const int GUIDED_TICKS = (GUIDED_TIME_MS / MISSION_DT_MS);
+    const float GUIDED_LAND_RATE_MPS = 0.4f;
+    const int GUIDED_LAND_TIME_MS = 15000;
+    const int GUIDED_LAND_TICKS = (GUIDED_LAND_TIME_MS / MISSION_DT_MS);
     const int VOODOO_TIMEOUT_MS = 3000;        // 3-second timeout 
     const int VOODOO_TICKS = (VOODOO_TIMEOUT_MS / MISSION_DT_MS);    
     const float VOODOO_DEADBAND_DEG = 15.0f; 
@@ -1389,8 +1493,6 @@ void autonomous_mission_task(void *parameters) {
     const float GUARD_CMD_NORM = 0.5f;   // = 100 PWM if RC_MAX_DELTA = 200
     const int LAND_TIME_MS = 15000;
     const int LAND_TICKS = (LAND_TIME_MS / MISSION_DT_MS);
-    const int LOITER_LAND_TIME_MS = 15000;
-    const int LOITER_LAND_TICKS = (LOITER_LAND_TIME_MS / MISSION_DT_MS);   // 750 ticks @ 50 Hz
 
     const int FLOW_BAD_TIME_MS = 500;
     const int FLOW_BAD_TICKS = (FLOW_BAD_TIME_MS / MISSION_DT_MS);       
@@ -1403,7 +1505,7 @@ void autonomous_mission_task(void *parameters) {
     static int althold_ticks = 0;   
     static int arm_ticks = 0;   
     static int takeoff_ticks = 0;
-    static int loiter_ticks = 0;
+    static int guided_ticks = 0;
     static int hover_ticks = 0;
     static int voodoo_ticks = 0;
     static int land_ticks = 0;
@@ -1412,10 +1514,10 @@ void autonomous_mission_task(void *parameters) {
     static int qual_bad_ticks = 0;    
     static float tkoff_alt = 1.0f;
     static float hov_time = 6.0f;   // Default
-    static bool x_guard_active = false;
-    static bool y_guard_active = false;
     static float center_n = 0.0f;
-    static float center_e = 0.0f;    
+    static float center_e = 0.0f;
+    static float center_d = 0.0f;
+    static float center_yaw = 0.0f;
 
     g_vehicle_state.mission_state = 0;
 
@@ -1499,7 +1601,7 @@ void autonomous_mission_task(void *parameters) {
                     g_mission_state = MISSION_TAKEOFF;
                     break;
                 }
-                if (althold_ticks < LOITER_TICKS) {
+                if (althold_ticks < GUIDED_TICKS) {
                     althold_ticks++;
                 }
                 else {
@@ -1517,10 +1619,9 @@ void autonomous_mission_task(void *parameters) {
                 if (alt_reached || (takeoff_ticks > TAKEOFF_TICKS)) {
                     g_vehicle_state.mission_state = 4;
 
-                    mavlink_send_rc_override_4ch(STM32_SYSTEM_ID, STM32_COMPONENT_ID, 1500, 1500, THR_HOLD, 1500);
-                    mavlink_set_mode(COPTER_MODE_LOITER);
+                    mavlink_set_mode(COPTER_MODE_GUIDED);
 
-                    g_mission_state = MISSION_WAIT_FOR_LOITER;
+                    g_mission_state = MISSION_WAIT_FOR_GUIDED;
                     break;
                 }
 
@@ -1532,24 +1633,21 @@ void autonomous_mission_task(void *parameters) {
 
                 break;
             }
-            case MISSION_WAIT_FOR_LOITER:
-                if (g_vehicle_state.mode == COPTER_MODE_LOITER) {
-                    //printf("Mission: LOITER Good.\n");
-                    loiter_ticks = 0;
+            case MISSION_WAIT_FOR_GUIDED:
+                if (g_vehicle_state.mode == COPTER_MODE_GUIDED) {
+                    guided_ticks = 0;
 
                     g_vehicle_state.mission_state = 5;
 
                     g_mission_state = MISSION_HOVER;
                     break;
                 }
-                if (loiter_ticks < LOITER_TICKS) {
-                    loiter_ticks++;
-                    mavlink_set_mode(COPTER_MODE_LOITER);   // keep sending so ArduPilot accepts
-                    mavlink_send_rc_override_4ch(STM32_SYSTEM_ID, STM32_COMPONENT_ID, 1500, 1500, THR_HOLD, 1500);
+                if (guided_ticks < GUIDED_TICKS) {
+                    guided_ticks++;
+                    mavlink_set_mode(COPTER_MODE_GUIDED);   // keep sending until ArduPilot confirms
                 }
                 else {
-                    //printf("Mission: LOITER Failed. Landing...\n");
-                    loiter_ticks = 0;
+                    guided_ticks = 0;
 
                     g_vehicle_state.mission_state = 7;
 
@@ -1562,7 +1660,15 @@ void autonomous_mission_task(void *parameters) {
                     voodoo_ticks = 0;
                     land_ticks = 0;
                     flow_bad_ticks = 0;
-                    qual_bad_ticks = 0;  
+                    qual_bad_ticks = 0;   
+                    
+                    if (!is_hover_origin_set) {
+                        center_n = g_vehicle_state.position_ned[0];
+                        center_e = g_vehicle_state.position_ned[1];
+                        center_d = g_vehicle_state.position_ned[2];
+                        center_yaw = g_vehicle_state.yaw;
+                        is_hover_origin_set = true;
+                    }                    
                     
                     g_vehicle_state.mission_state = 6;
 
@@ -1578,17 +1684,9 @@ void autonomous_mission_task(void *parameters) {
 
                     g_vehicle_state.mission_state = 7;
 
-                    g_mission_state = MISSION_LOITER_LAND;
+                    g_mission_state = MISSION_GUIDED_LAND;
                     break; // Exit the state immediately
                 }
-                if (!is_origin_set) {
-                    center_n = g_vehicle_state.position_ned[0];
-                    center_e = g_vehicle_state.position_ned[1];
-                    x_guard_active = false;
-                    y_guard_active = false;     
-                    is_origin_set = true;               
-                }
-                // --- SAFETY --- //
                 // Drift accumulation
                 float dn = g_vehicle_state.position_ned[0] - center_n;
                 float de = g_vehicle_state.position_ned[1] - center_e; 
@@ -1612,50 +1710,53 @@ void autonomous_mission_task(void *parameters) {
 
                 // --- Single-Action-Priority Logic ---
                 if (peer_pitch < -VOODOO_PITCH_THRESHOLD) {
-                    // Move Forward (Pitch stick forward is negative X)
+                    // Move Forward
                     voodoo_ticks = 0;
-                    mavlink_send_rc_override_4ch(STM32_SYSTEM_ID, STM32_COMPONENT_ID, 1500, 1300, 1500, 1500);
+                    mavlink_set_voodoo(0.3f, 0, 0, center_yaw);
                 }
                 else if (peer_pitch > VOODOO_PITCH_THRESHOLD) {
-                    // Move Backward (Pitch stick back is positive X)
+                    // Move Backward
                     voodoo_ticks = 0;
-                    mavlink_send_rc_override_4ch(STM32_SYSTEM_ID, STM32_COMPONENT_ID, 1500, 1700, 1500, 1500);
+                    mavlink_set_voodoo(-0.3f, 0, 0, center_yaw);
                 }
                 else if (peer_roll > VOODOO_ROLL_THRESHOLD) {
-                    // Move Right (Roll stick right is positive Y)
+                    // Move Right
                     voodoo_ticks = 0;
-                    mavlink_send_rc_override_4ch(STM32_SYSTEM_ID, STM32_COMPONENT_ID, 1700, 1500, 1500, 1500);
+                    mavlink_set_voodoo(0, 0.3f, 0, center_yaw);
                 }
                 else if (peer_roll < -VOODOO_ROLL_THRESHOLD) {
-                    // Move Left (Roll stick left is negative Y)
+                    // Move Left
                     voodoo_ticks = 0;
-                    mavlink_send_rc_override_4ch(STM32_SYSTEM_ID, STM32_COMPONENT_ID, 1300, 1500, 1500, 1500);
+                    mavlink_set_voodoo(0, -0.3f, 0, center_yaw);
                 }
                 else {
-                    // No thresholds met, default to a stable hover
+                    // No threshold met — hold position
                     voodoo_ticks++;
-                    mavlink_send_rc_override_4ch(STM32_SYSTEM_ID, STM32_COMPONENT_ID, 1500, 1500, 1500, 1500);
+                    mavlink_set_voodoo(0, 0, 0, center_yaw);
                 }
                 break;
             }                            
-            case MISSION_LOITER_LAND: {
-                uint16_t loiter_thr = (uint16_t)(1500 - (land_ticks * 500 / LOITER_LAND_TICKS));
+            case MISSION_GUIDED_LAND: {
                 if (land_ticks == 0) {
                     loop_counter++;
                     g_vehicle_state.mission_state = 8;
                 }
-                //if ((land_ticks >= LOITER_LAND_TICKS) || (g_vehicle_state.position_ned[2] > -2.0f * LAND_ALT)) {
-                if (land_ticks >= LOITER_LAND_TICKS) {
+                // Hand off to ArduPilot LAND once close to the ground
+                if (g_vehicle_state.position_ned[2] > -0.30f) {
+                    land_ticks = 0;
+                    g_mission_state = MISSION_COMMAND_LAND;
+                    break;
+                }
+                // Timeout fallback: force disarm
+                if (land_ticks >= GUIDED_LAND_TICKS) {
                     land_ticks = 0;
                     disarm_ticks = 0;
-                    //mavlink_send_rc_override_4ch(STM32_SYSTEM_ID, STM32_COMPONENT_ID, 1500, 1500, loiter_thr, 1500);
                     g_vehicle_state.mission_state = 9;
                     g_mission_state = MISSION_DISARM;
                     break;
                 }
-                // Ramp throttle 1500 → 1000 over LOITER_LAND_TICKS
-                if (loiter_thr < 1000) loiter_thr = 1000;
-                mavlink_send_rc_override_4ch(STM32_SYSTEM_ID, STM32_COMPONENT_ID, 1500, 1500, loiter_thr, 1500);
+                // Command a constant descent velocity; hold N/E at zero
+                mavlink_set_local_vel_target(0.0f, 0.0f, GUIDED_LAND_RATE_MPS);
                 land_ticks++;
                 break;
             }
@@ -1709,6 +1810,7 @@ void autonomous_mission_task(void *parameters) {
                         is_mission_reset = false; // <-- IMPORTANT: Clear the reset flag
                         is_voodoo_start = false;
                         is_origin_set = false;
+                        is_hover_origin_set = false;
                         g_vehicle_state.mission_state = 0;
                         g_peer_land_requested = false;
                         // Go back to the very first state

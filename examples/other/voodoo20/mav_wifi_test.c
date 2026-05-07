@@ -18,7 +18,6 @@
 #define LEADER_SYSTEM_ID 20
 #define PEER1_SYSTEM_ID 21
 #define PEER2_SYSTEM_ID 22
-#define PEER3_SYSTEM_ID 23
 #define P2P_MAX_CHAN   1   // adjust to however many logical streams
 #define SECONDARY_SYSTEM_ID 42
 #define SECONDARY_COMPONENT_ID 191
@@ -38,10 +37,10 @@
 #define EKF_VEL_VAR_MAX   0.8f
 
 // Sensor freshness timeouts (ms): data older than this is treated as unhealthy.
-#define RANGE_FRESH_MS   500   // 10 Hz stream → 5 missed messages
-#define FLOW_FRESH_MS    500   // 10 Hz stream → 5 missed messages
-#define BAT_FRESH_MS    2000   // ~1 Hz SYS_STATUS → 2 missed messages
-#define EKF_FRESH_MS    1000   // 2 Hz EKF_STATUS_REPORT → 2 missed messages
+#define RANGE_FRESH_MS   500
+#define FLOW_FRESH_MS    500
+#define BAT_FRESH_MS    2000
+#define EKF_FRESH_MS    1000
 
 // --- Global Variables ---
 static struct pi_device uart_device;
@@ -54,20 +53,18 @@ uint8_t send_buffer[MAVLINK_MAX_PACKET_LEN];
 static volatile bool is_mission_start = false;
 static volatile bool is_mission_reset = false;
 static volatile bool is_mission_terminate = false;
-static volatile bool is_origin_set = false;
-static volatile bool is_voodoo_start = false;
 static volatile bool g_fc_connected = false;
 static volatile bool g_pos_stream_active = false;
 static volatile bool g_att_stream_active = false;
-static volatile bool g_range_stream_active = false;    // rangefinder has returned a non-zero reading recently
-static volatile TickType_t g_range_last_tick = 0;      // FreeRTOS tick of last valid rangefinder reading
+static volatile bool g_range_stream_active = false;
+static volatile TickType_t g_range_last_tick = 0;
 static volatile bool g_ahrs_stream_active = false;
-static volatile bool g_flow_healthy = false;           // optical flow quality > 0
-static volatile TickType_t g_flow_last_tick = 0;       // FreeRTOS tick of last valid optflow reading
-static volatile bool g_battery_healthy = false;        // battery voltage > 4 V
-static volatile TickType_t g_battery_last_tick = 0;    // FreeRTOS tick of last valid vbat reading
-static volatile bool g_ekf_healthy = false;            // EKF pos_horiz/vert_variance below threshold
-static volatile TickType_t g_ekf_last_tick = 0;        // FreeRTOS tick of last healthy EKF update
+static volatile bool g_flow_healthy = false;
+static volatile TickType_t g_flow_last_tick = 0;
+static volatile bool g_battery_healthy = false;
+static volatile TickType_t g_battery_last_tick = 0;
+static volatile bool g_ekf_healthy = false;
+static volatile TickType_t g_ekf_last_tick = 0;
 static volatile float g_battery_voltage_v = 0.0f;
 static volatile bool g_param_hov_time = false;
 static volatile bool g_param_tkoff_alt = false;
@@ -75,7 +72,6 @@ static volatile bool g_param_loops = false;
 static volatile bool g_params_received = false;
 static volatile bool g_p2p_data_received_once = false;
 static volatile bool g_peer_land_requested = false;
-static volatile bool g_peer_ready[3] = {false, false, false}; // indices: 0=peer21, 1=peer22, 2=peer23
 static volatile int loop_counter = 0;
 
 // ACK declarations
@@ -118,23 +114,29 @@ PeerState_t g_peer_state = {0}; // Holds the last known attitude of the peer
 
 typedef struct {
     float hov_time;
-    float loops;
     float tkoff_alt;
-    // Add other state variables here as needed
+    float loops;
 } ControllerState_t;
 
 ControllerState_t g_controller_state = {0}; // A single, shared structure to hold the controller's state
 
 // Define the states for your mission
 typedef enum {
-    MISSION_WAIT_FOR_LOITER,
-    MISSION_WAIT_FOR_ALTHOLD,
+    MISSION_WAIT_FOR_GUIDED,
     MISSION_WAIT_FOR_COMMAND,
+    MISSION_WAIT_FOR_ALTHOLD,
     MISSION_ARM,
     MISSION_TAKEOFF,
     MISSION_HOVER,
-    VOODOO_CONTROL,
-    MISSION_LOITER_LAND,
+    MISSION_GUIDED_LAND,
+    MISSION_MOVE_LEFT,
+    MISSION_BRAKE_1,
+    MISSION_MOVE_BACKWARDS,
+    MISSION_BRAKE_2,
+    MISSION_MOVE_RIGHT,
+    MISSION_BRAKE_3,
+    MISSION_MOVE_FORWARD,
+    MISSION_BRAKE_4,
     MISSION_COMMAND_LAND,
     MISSION_WAIT_FOR_LAND,
     MISSION_DISARM,
@@ -146,14 +148,21 @@ volatile MissionState_t g_mission_state = MISSION_WAIT_FOR_COMMAND;
 // Helper function to convert mission state enum to a string for printing
 const char* mission_state_to_string(MissionState_t state) {
     switch (state) {
-        case MISSION_WAIT_FOR_LOITER:       return "WAIT_FOR_LOITER";
+        case MISSION_WAIT_FOR_GUIDED:       return "WAIT_FOR_GUIDED";
+        case MISSION_WAIT_FOR_COMMAND:      return "WAIT_FOR_COMMAND";
         case MISSION_WAIT_FOR_ALTHOLD:      return "WAIT_FOR_ALTHOLD";
-        case MISSION_WAIT_FOR_COMMAND:      return "WAIT_FOR_COMMAND"; 
         case MISSION_ARM:                   return "ARM_VEHICLE";
         case MISSION_TAKEOFF:               return "COMMAND_TAKEOFF";
         case MISSION_HOVER:                 return "HOVER";
-        case VOODOO_CONTROL:                return "VOODOO";
-        case MISSION_LOITER_LAND:           return "LOITER_LAND";
+        case MISSION_GUIDED_LAND:           return "GUIDED_LAND";
+        case MISSION_MOVE_LEFT:             return "MOVE_LEFT";
+        case MISSION_BRAKE_1:               return "BRAKE";
+        case MISSION_MOVE_BACKWARDS:        return "MOVE_BACKWARDS";
+        case MISSION_BRAKE_2:               return "BRAKE";
+        case MISSION_MOVE_RIGHT:            return "MOVE_RIGHT";
+        case MISSION_BRAKE_3:               return "BRAKE";
+        case MISSION_MOVE_FORWARD:          return "MOVE_FORWARD";
+        case MISSION_BRAKE_4:               return "BRAKE";
         case MISSION_COMMAND_LAND:          return "COMMAND_LAND";
         case MISSION_WAIT_FOR_LAND:         return "WAIT_FOR_LAND";
         case MISSION_DISARM:                return "DISARM";
@@ -311,7 +320,7 @@ uint8_t p2p_att_parse_char(uint8_t chan, uint8_t c, p2p_att_v1_t *out)
         return 0; // still accumulating
     }
 
-    // We have 24 bytes: validate checksum
+    // We have 20 bytes: validate checksum
     bool ok = p2p_fletcher8_ok(st->buf, P2P_ATT_V1_LEN);
 
     if (!ok) {
@@ -372,7 +381,7 @@ uint8_t p2p_ms_parse_char(uint8_t chan, uint8_t c, p2p_mstate_v1_t *out)
         return 0; // still accumulating
     }
 
-    // We have 17 bytes: validate checksum
+    // We have 20 bytes: validate checksum
     bool ok = p2p_fletcher8_ok(st->buf, P2P_MS_V1_LEN);
 
     if (!ok) {
@@ -398,10 +407,6 @@ uint8_t p2p_ms_parse_char(uint8_t chan, uint8_t c, p2p_mstate_v1_t *out)
  *
  * Returns 1 if a full valid packet was decoded into *out.
  * Returns 0 otherwise.
- *
- * - Resyncs on STX.
- * - Validates Fletcher checksum.
- * - Copies the packet into *out only on success.
  */
 uint8_t p2p_pos_parse_char(uint8_t chan, uint8_t c, p2p_pos_v1_t *out)
 {
@@ -411,7 +416,6 @@ uint8_t p2p_pos_parse_char(uint8_t chan, uint8_t c, p2p_pos_v1_t *out)
 
     p2p_parser_state_t *st = &g_p2p_pos_state[chan];
 
-    // If we're idle, wait for STX
     if (st->idx == 0) {
         if (c != P2P_STX_POS_V1) {
             return 0;
@@ -420,7 +424,6 @@ uint8_t p2p_pos_parse_char(uint8_t chan, uint8_t c, p2p_pos_v1_t *out)
         return 0;
     }
 
-    // If we see STX unexpectedly mid-packet, treat as resync (start new packet)
     if (c == P2P_STX_POS_V1) {
         st->buf[0] = c;
         st->idx = 1;
@@ -430,26 +433,19 @@ uint8_t p2p_pos_parse_char(uint8_t chan, uint8_t c, p2p_pos_v1_t *out)
     st->buf[st->idx++] = c;
 
     if (st->idx < P2P_POS_V1_LEN) {
-        return 0; // still accumulating
+        return 0;
     }
 
-    // We have 24 bytes: validate checksum
     bool ok = p2p_fletcher8_ok(st->buf, P2P_POS_V1_LEN);
 
     if (!ok) {
         st->parse_errors++;
-
-        // Try to resync: if last byte could be STX, restart; else reset.
-        // (We already handled "c == STX" above, so just reset.)
         st->idx = 0;
         return 0;
     }
 
-    // Success
     memcpy(out, st->buf, P2P_POS_V1_LEN);
     st->packets_ok++;
-
-    // Ready for next packet
     st->idx = 0;
     return 1;
 }
@@ -690,7 +686,6 @@ void request_task(void *parameters) {
     static bool requested_list_once = false;
     static uint16_t sequence = 0;
     static uint16_t value = 0;
-    static uint16_t res1 = 0; // computed each tick from g_peer_ready
 
     while(1) {
         // Send Heartbeats so FC knows you're awake
@@ -702,12 +697,7 @@ void request_task(void *parameters) {
                         ((uint16_t)health.flow    << 1) |
                         ((uint16_t)health.battery << 2) |
                         ((uint16_t)health.ekf     << 3);
-
-        // Pack peer readiness into res1: bit3=peer21, bit2=peer22, bit1=peer23, bit0=leader_active
-        res1 = ((uint16_t)g_peer_ready[0]          << 3) |  // peer 21
-               ((uint16_t)g_peer_ready[1]          << 2) |  // peer 22
-               ((uint16_t)g_peer_ready[2]          << 1) |  // peer 23
-               ((uint16_t)g_p2p_data_received_once     );   // leader connected
+        uint16_t res1 = 0;
 
         // Send Mission State Updates
         send_statustextf(MAV_SEVERITY_ALERT, "MS1,st=%u,val=%u,seq=%u,res0=%u,res1=%u", g_vehicle_state.mission_state, value, sequence, res0, res1);
@@ -770,6 +760,7 @@ void uart_receive_task(void *parameters) {
     mavlink_status_t status = {0};
     p2p_att_v1_t pkt;
     p2p_mstate_v1_t pkt2;
+    p2p_pos_v1_t pkt3;
 
     // --- Buffer for re-serializing the validated MAVLink message ---
     uint8_t mavlink_tx_buffer[MAVLINK_MAX_PACKET_LEN];
@@ -898,7 +889,7 @@ void uart_receive_task(void *parameters) {
                         }
 
                         break;
-                    }      
+                    }
                     case MAVLINK_MSG_ID_OPTICAL_FLOW: {
                         mavlink_optical_flow_t opt;
                         mavlink_msg_optical_flow_decode(&received_msg, &opt);
@@ -910,7 +901,7 @@ void uart_receive_task(void *parameters) {
                         if (opt.quality > 0) {
                             g_flow_healthy = true;
                             g_flow_last_tick = xTaskGetTickCount();
-                        }                        
+                        }
 
                         break;
                     }
@@ -932,10 +923,8 @@ void uart_receive_task(void *parameters) {
                                         (ekf.velocity_variance  < EKF_VEL_VAR_MAX);
                         g_ekf_last_tick = xTaskGetTickCount();
                         break;
-                    }                              
+                    }
                     case MAVLINK_MSG_ID_GPS_GLOBAL_ORIGIN:
-                        is_origin_set = true;
-                        
                         break;
                     case MAVLINK_MSG_ID_COMMAND_ACK: {
                         mavlink_command_ack_t ack;
@@ -970,76 +959,56 @@ void uart_receive_task(void *parameters) {
                 cpxSendRawData(CPX_T_WIFI_HOST, CPX_F_CONSOLE, mavlink_tx_buffer, len);
             }                
         }         
-        // P2P framing: strip the 2-byte preamble (0xAB magic + rssi) added by the sender,
-        // then forward the inner payload bytes to the existing fixed-length parsers.
-        {
-            static enum { WAIT_MAGIC, WAIT_RSSI, FORWARD } p2p_frame_st = WAIT_MAGIC;
-            static uint8_t p2p_frame_rssi = 0;
+        if (p2p_att_parse_char(0, rx_byte, &pkt)) {
+            if (pkt.peer_id == LEADER_SYSTEM_ID) {
+                if (!g_p2p_data_received_once) {
+                    g_p2p_data_received_once = true;
+                    printf("Peer stream active [%d]", pkt.peer_id);
+                    send_statustextf(MAV_SEVERITY_ALERT, "Peer Stream Active.");
+                }              
+                
+                // Keep track of how many attitude messages we've received
+                static int attitude_msg_count = 0;
+                attitude_msg_count++;                
 
-            if (p2p_frame_st == WAIT_MAGIC) {
-                if (rx_byte == P2P_MAGIC)
-                    p2p_frame_st = WAIT_RSSI;
-            } else if (p2p_frame_st == WAIT_RSSI) {
-                p2p_frame_rssi = rx_byte;
-                p2p_frame_st = FORWARD;
-            } else {
-                // In FORWARD: a fresh 0xAB means a new packet is starting.
-                if (rx_byte == P2P_MAGIC) {
-                    p2p_frame_st = WAIT_RSSI;
-                } else {
-                    if (p2p_att_parse_char(0, rx_byte, &pkt)) {
-                        if (pkt.peer_id == LEADER_SYSTEM_ID) {
-                            if (!g_p2p_data_received_once) {
-                                g_p2p_data_received_once = true;
-                                printf("Peer stream active [%d]", pkt.peer_id);
-                                send_statustextf(MAV_SEVERITY_ALERT, "Peer Stream Active.");
-                            }
-
-                            static int attitude_msg_count = 0;
-                            attitude_msg_count++;
-
-                            g_peer_state.roll = pkt.roll_cd / 100.0f;
-                            g_peer_state.pitch = pkt.pitch_cd / 100.0f;
-                            g_peer_state.yaw = pkt.yaw_cd / 100.0f;
-                            g_peer_state.rssi = p2p_frame_rssi;
-                            g_peer_state.last_rx_tick = xTaskGetTickCount();
-
-                            if (attitude_msg_count % 10 == 0) {
-                                // printf("<- P2P ATTITUDE: Roll=%.2f Pitch=%.2f Yaw=%.2f\n", g_peer_state.roll, g_peer_state.pitch, g_peer_state.yaw);
-                                // cpxPrintToConsole(LOG_TO_WIFI, "<- P2P ATTITUDE: Roll=%.2f Pitch=%.2f Yaw=%.2f\n", g_peer_state.roll, g_peer_state.pitch, g_peer_state.yaw);
-                            }
-                        }
-                    }
-                    if (p2p_ms_parse_char(0, rx_byte, &pkt2)) {
-                        if ((pkt2.peer_id >= PEER1_SYSTEM_ID) && (pkt2.peer_id <= PEER3_SYSTEM_ID)) {
-                            g_peer_ready[pkt2.peer_id - PEER1_SYSTEM_ID] = (pkt2.res_0 == 15);
-                        }
-                        if ((pkt2.peer_id == PEER1_SYSTEM_ID) || (pkt2.peer_id == PEER2_SYSTEM_ID) || (pkt2.peer_id == PEER3_SYSTEM_ID)) {
-                            if ((pkt2.st >= 1) && !is_mission_start) {
-                                printf("MISSION GO! (FOLLOWING)\n");
-                                send_statustextf(MAV_SEVERITY_ALERT, "MISSION GO! (FOLLOWING)");
-                                is_mission_start = true;
-                            }
-                            if (pkt2.st == 6) {
-                                printf("Starting Voodoo!\n");
-                                send_statustextf(MAV_SEVERITY_ALERT, "Starting Voodoo!");
-                                is_voodoo_start = true;
-                            }
-                            if (pkt2.st >= 7) {
-                                g_peer_land_requested = true;
-                            }
-                        }
-                    }
-                    if (p2p_pos_parse_char(0, rx_byte, &pkt)) {
-                        // Update the global peer state
-                        //g_peer_state.x_pos = pkt.x_pos;
-                        //g_peer_state.y_pos = pkt.y_pos;
-                        //g_peer_state.z_pos = pkt.z_pos;
-                        //g_peer_state.last_rx_tick = xTaskGetTickCount();
-                    }
+                // Update the global peer state
+                g_peer_state.roll = pkt.roll_cd / 100.0f;
+                g_peer_state.pitch = pkt.pitch_cd / 100.0f;
+                g_peer_state.yaw = pkt.yaw_cd / 100.0f;  
+                g_peer_state.last_rx_tick = xTaskGetTickCount();
+                
+                // Every 10 messages, print the data
+                if (attitude_msg_count % 10 == 0) {
+                    // Print the attitude data to the WiFi console
+                    // printf("<- P2P ATTITUDE: Roll=%.2f Pitch=%.2f Yaw=%.2f\n", g_peer_state.roll, g_peer_state.pitch, g_peer_state.yaw);
+                    // cpxPrintToConsole(LOG_TO_WIFI, "<- P2P ATTITUDE: Roll=%.2f Pitch=%.2f Yaw=%.2f\n", g_peer_state.roll, g_peer_state.pitch, g_peer_state.yaw);
+                }                                 
+            }
+        }  
+        if (p2p_ms_parse_char(0, rx_byte, &pkt2)) {
+            if ((pkt2.peer_id == PEER1_SYSTEM_ID) || (pkt2.peer_id == PEER2_SYSTEM_ID)) {                
+                if ((pkt2.st >= 1) && !is_mission_start) {
+                    printf("MISSION GO! (FOLLOWING)\n");
+                    send_statustextf(MAV_SEVERITY_ALERT, "MISSION GO! (FOLLOWING)");                    
+                    is_mission_start = true;
+                }
+                if (pkt2.st == 6) {
+                    printf("Starting Voodoo!\n");
+                    send_statustextf(MAV_SEVERITY_ALERT, "Starting Voodoo!");
+                }
+                if (pkt2.st >= 7) {
+                    g_peer_land_requested = true;
                 }
             }
-        }                         
+        }
+        if (p2p_pos_parse_char(0, rx_byte, &pkt3)) {
+            if (pkt3.peer_id == LEADER_SYSTEM_ID) {
+                g_peer_state.x_pos = pkt3.x_pos;
+                g_peer_state.y_pos = pkt3.y_pos;
+                g_peer_state.z_pos = pkt3.z_pos;
+                g_peer_state.last_rx_tick = xTaskGetTickCount();
+            }
+        }
     }
 }
 
@@ -1144,22 +1113,14 @@ void mavlink_set_mode(uint8_t custom_mode) {
 
 // Wrapper for component arm
 void mavlink_arm_vehicle() {
-    mavlink_send_command_long(
-        MAV_CMD_COMPONENT_ARM_DISARM,
-        1.0f,        // param1: arm
-        0,           // param2: normal arm
-        0, 0, 0, 0, 0
-    );
+    // printf("-> Sending ARM command.\n");
+    //cpxPrintToConsole(LOG_TO_WIFI, "-> Sending ARM command.\n");
+    mavlink_send_command_long(MAV_CMD_COMPONENT_ARM_DISARM, 1.0f, 0, 0, 0, 0, 0, 0);
 }
 
 void mavlink_disarm_vehicle() {
-    // Param 1 = 0.0f for DISARM
-    mavlink_send_command_long(
-        MAV_CMD_COMPONENT_ARM_DISARM,
-        0.0f,        // param1: disarm
-        21196.0f,    // param2: force disarm
-        0, 0, 0, 0, 0
-    );
+    // Param 1 = 0.0f for DISARM, param 2 = 21196.0f for force disarm
+    mavlink_send_command_long(MAV_CMD_COMPONENT_ARM_DISARM, 0.0f, 21196.0f, 0, 0, 0, 0, 0);
 }
 
 /**
@@ -1193,6 +1154,38 @@ void mavlink_set_local_target(float x_north, float y_east, float z_down) {
         0, 0, 0, // velocity (ignored)
         0, 0, 0, // acceleration (ignored)
         0, 0     // yaw & yaw rate (ignored)
+    );
+    send_mavlink_message(&msg);
+}
+
+/**
+ * @brief Commands the vehicle with a velocity target in the local NED frame.
+ * @param vx_north Velocity North in m/s.
+ * @param vy_east  Velocity East in m/s.
+ * @param vz_down  Velocity Down in m/s (positive = descend).
+ */
+void mavlink_set_local_vel_target(float vx_north, float vy_east, float vz_down) {
+    mavlink_message_t msg;
+
+    uint16_t type_mask = POSITION_TARGET_TYPEMASK_X_IGNORE |
+                         POSITION_TARGET_TYPEMASK_Y_IGNORE |
+                         POSITION_TARGET_TYPEMASK_Z_IGNORE |
+                         POSITION_TARGET_TYPEMASK_AX_IGNORE |
+                         POSITION_TARGET_TYPEMASK_AY_IGNORE |
+                         POSITION_TARGET_TYPEMASK_AZ_IGNORE |
+                         POSITION_TARGET_TYPEMASK_YAW_IGNORE |
+                         POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE;
+
+    mavlink_msg_set_position_target_local_ned_pack(
+        GAP8_SYSTEM_ID, GAP8_COMPONENT_ID, &msg,
+        0,
+        1, 1,
+        MAV_FRAME_LOCAL_NED,
+        type_mask,
+        0, 0, 0,
+        vx_north, vy_east, vz_down,
+        0, 0, 0,
+        0, 0
     );
     send_mavlink_message(&msg);
 }
@@ -1316,44 +1309,6 @@ void mav_send_debug_vect(const char *name, float x, float y, float z)
     send_mavlink_message(&msg);
 }
 
-// =====================
-// Vec2 helper
-// =====================
-typedef struct { float x; float y; } vec2f_t;
-
-static inline float clampf(float x, float lo, float hi) {
-    return (x < lo) ? lo : (x > hi) ? hi : x;
-}
-
-static inline float norm2f(float x, float y) {
-    return sqrtf(x*x + y*y);
-}
-
-static inline float apply_deadband_and_scale(float x_deg, float deadband_deg, float in_max_deg)
-{
-    float ax = fabsf(x_deg);
-
-    if (ax <= deadband_deg) {
-        return 0.0f;
-    }
-
-    // Normalize outside deadband to 0..1
-    float u = (ax - deadband_deg) / (in_max_deg - deadband_deg);
-    u = clampf(u, 0.0f, 1.0f);
-
-    return copysignf(u, x_deg);   // returns [-1, 1]
-}
-
-static inline uint16_t rc_from_norm(float u, uint16_t trim, uint16_t max_delta)
-{
-    float pwm = (float)trim + (u * (float)max_delta);
-
-    if (pwm < (float)(trim - max_delta)) pwm = (float)(trim - max_delta);
-    if (pwm > (float)(trim + max_delta)) pwm = (float)(trim + max_delta);
-
-    return (uint16_t)(pwm + 0.5f);
-}
-
 // The mission task function
 void autonomous_mission_task(void *parameters) {
     VehicleState_t *state = (VehicleState_t *)parameters;
@@ -1368,30 +1323,20 @@ void autonomous_mission_task(void *parameters) {
     const int TAKEOFF_TIME_MS = 2500;
     const int TAKEOFF_TICKS = (TAKEOFF_TIME_MS / MISSION_DT_MS);
     const int TAKEOFF_RAMP_MS = 1500;
-    const int TAKEOFF_RAMP_TICKS = (TAKEOFF_RAMP_MS / MISSION_DT_MS);  // 100 ticks @ 50 Hz
+    const int TAKEOFF_RAMP_TICKS = (TAKEOFF_RAMP_MS / MISSION_DT_MS);
     const int THR_TKOFF_START = 1450;
     const int THR_TKOFF_END   = 1550;
-    const int LOITER_TIME_MS = 1000;
-    const int LOITER_TICKS = (LOITER_TIME_MS / MISSION_DT_MS);
-    const int VOODOO_TIMEOUT_MS = 3000;        // 3-second timeout 
-    const int VOODOO_TICKS = (VOODOO_TIMEOUT_MS / MISSION_DT_MS);    
-    const float VOODOO_DEADBAND_DEG = 15.0f; 
-    const float VOODOO_IN_MAX_DEG = 35.0f;   // saturate leader input here  
-    const int VOODOO_PITCH_THRESHOLD = 20; // ~20 degrees
-    const int VOODOO_ROLL_THRESHOLD = 20;  // ~20 degrees    
-    const uint16_t RC_TRIM = 1500;
-    const uint16_t RC_MAX_DELTA = 200;     // 1500 +/- 200
-    const bool INVERT_ROLL_CMD  = false;  // Default
-    const bool INVERT_PITCH_CMD = false;  // Default
-    const float BOX_OUTER_M = 1.5f;
-    const float BOX_INNER_M = 1.0f;
-    const float BOX_SAFETY_M = 3.0f;
-    const float GUARD_CMD_NORM = 0.5f;   // = 100 PWM if RC_MAX_DELTA = 200
-    const int LAND_TIME_MS = 15000;
-    const int LAND_TICKS = (LAND_TIME_MS / MISSION_DT_MS);
-    const int LOITER_LAND_TIME_MS = 15000;
-    const int LOITER_LAND_TICKS = (LOITER_LAND_TIME_MS / MISSION_DT_MS);   // 750 ticks @ 50 Hz
-
+    const int GUIDED_LAND_TIME_MS = 15000;
+    const int GUIDED_LAND_TICKS = (GUIDED_LAND_TIME_MS / MISSION_DT_MS);
+    const float GUIDED_LAND_RATE_MPS = 0.4f;
+    const int GUIDED_TIME_MS = 2000;
+    const int GUIDED_TICKS = (GUIDED_TIME_MS / MISSION_DT_MS);
+    const int MOVE_TIME_MS = 3000;
+    const int MOVE_TICKS = (MOVE_TIME_MS / MISSION_DT_MS);
+    const int BRAKE_TIME_MS = 1500;
+    const int BRAKE_TICKS = (BRAKE_TIME_MS / MISSION_DT_MS);
+    const int LAND_TIME_MS = 4000;
+    const int LAND_TICKS = (LAND_TIME_MS / MISSION_DT_MS);       
     const int FLOW_BAD_TIME_MS = 500;
     const int FLOW_BAD_TICKS = (FLOW_BAD_TIME_MS / MISSION_DT_MS);       
     const int THR_MIN = 1000;
@@ -1403,19 +1348,22 @@ void autonomous_mission_task(void *parameters) {
     static int althold_ticks = 0;   
     static int arm_ticks = 0;   
     static int takeoff_ticks = 0;
-    static int loiter_ticks = 0;
+    static int guided_ticks = 0;
     static int hover_ticks = 0;
-    static int voodoo_ticks = 0;
+    static int move_ticks = 0;
+    static int brake_ticks = 0;
     static int land_ticks = 0;
-    static int disarm_ticks = 0;
     static int flow_bad_ticks = 0;
     static int qual_bad_ticks = 0;    
     static float tkoff_alt = 1.0f;
     static float hov_time = 6.0f;   // Default
-    static bool x_guard_active = false;
-    static bool y_guard_active = false;
+    static int guid_loops = 1;      // Default
+    static int disarm_ticks = 0;
+    static int move_counter = 0;
     static float center_n = 0.0f;
-    static float center_e = 0.0f;    
+    static float center_e = 0.0f;
+    static float center_d = 0.0f;
+    static bool is_origin_set = false;
 
     g_vehicle_state.mission_state = 0;
 
@@ -1427,11 +1375,16 @@ void autonomous_mission_task(void *parameters) {
         if (is_mission_terminate) {
             //cpxPrintToConsole(LOG_TO_WIFI, "Mission terminated by user. Disarming...\n");
             mavlink_disarm_vehicle();
-            is_mission_terminate = false; // Clear the flag
+            is_mission_terminate = false;
             g_mission_state = MISSION_DONE;
-            // Continue to the switch to immediately enter the DONE state
-        }     
-        
+        }
+        if (g_peer_land_requested) {
+            g_peer_land_requested = false;
+            land_ticks = 0;
+            g_vehicle_state.mission_state = 14;
+            g_mission_state = MISSION_GUIDED_LAND;
+        }
+
         // --- SAFETY --- //
         float v2 = (g_vehicle_state.flow_comp_m_x * g_vehicle_state.flow_comp_m_x) + (g_vehicle_state.flow_comp_m_y * g_vehicle_state.flow_comp_m_y);
         if (v2 > V_BAD2) {
@@ -1447,9 +1400,19 @@ void autonomous_mission_task(void *parameters) {
         bool flow_lost = (flow_bad_ticks >= FLOW_BAD_TICKS) || (qual_bad_ticks >= FLOW_BAD_TICKS);
 
         if (flow_lost && /* only during maneuver */ 
-            ((g_mission_state == VOODOO_CONTROL) || (g_mission_state == MISSION_HOVER))) {
+            (g_mission_state == MISSION_MOVE_LEFT ||
+            g_mission_state == MISSION_MOVE_BACKWARDS ||
+            g_mission_state == MISSION_MOVE_RIGHT ||
+            g_mission_state == MISSION_MOVE_FORWARD ||
+            g_mission_state == MISSION_BRAKE_1 ||
+            g_mission_state == MISSION_BRAKE_2 ||
+            g_mission_state == MISSION_BRAKE_3 ||
+            g_mission_state == MISSION_BRAKE_4 ||
+            g_mission_state == MISSION_HOVER)) {
 
-            g_vehicle_state.mission_state = 7;
+            //printf("FLOW LOST: v2=%.2f (m/s)^2 qual=%u -> LAND\n", v2, g_vehicle_state.quality);
+
+            g_vehicle_state.mission_state = 14;
 
             g_mission_state = MISSION_COMMAND_LAND;
         }
@@ -1457,12 +1420,13 @@ void autonomous_mission_task(void *parameters) {
 
         switch (g_mission_state) {   
             case MISSION_WAIT_FOR_COMMAND:
-                if (is_mission_start && g_params_received && g_p2p_data_received_once) {
+                if (is_mission_start && g_params_received) {
                     HealthStatus_t health = compute_health_status();
                     if (health.range && health.flow && health.battery && health.ekf) {
                         g_vehicle_state.mission_state = 1;
                         tkoff_alt = g_controller_state.tkoff_alt;
                         hov_time = g_controller_state.hov_time;
+                        guid_loops = g_controller_state.loops;
                         is_mission_start = false;
                         send_statustextf(MAV_SEVERITY_ALERT, "Mission: Starting Mission!");
                         mavlink_arm_vehicle();
@@ -1499,7 +1463,7 @@ void autonomous_mission_task(void *parameters) {
                     g_mission_state = MISSION_TAKEOFF;
                     break;
                 }
-                if (althold_ticks < LOITER_TICKS) {
+                if (althold_ticks < GUIDED_TICKS) {
                     althold_ticks++;
                 }
                 else {
@@ -1518,9 +1482,9 @@ void autonomous_mission_task(void *parameters) {
                     g_vehicle_state.mission_state = 4;
 
                     mavlink_send_rc_override_4ch(STM32_SYSTEM_ID, STM32_COMPONENT_ID, 1500, 1500, THR_HOLD, 1500);
-                    mavlink_set_mode(COPTER_MODE_LOITER);
+                    mavlink_set_mode(COPTER_MODE_GUIDED);
 
-                    g_mission_state = MISSION_WAIT_FOR_LOITER;
+                    g_mission_state = MISSION_WAIT_FOR_GUIDED;
                     break;
                 }
 
@@ -1532,24 +1496,22 @@ void autonomous_mission_task(void *parameters) {
 
                 break;
             }
-            case MISSION_WAIT_FOR_LOITER:
-                if (g_vehicle_state.mode == COPTER_MODE_LOITER) {
-                    //printf("Mission: LOITER Good.\n");
-                    loiter_ticks = 0;
+            case MISSION_WAIT_FOR_GUIDED:
+                if (g_vehicle_state.mode == COPTER_MODE_GUIDED) {
+                    guided_ticks = 0;
 
                     g_vehicle_state.mission_state = 5;
 
                     g_mission_state = MISSION_HOVER;
                     break;
                 }
-                if (loiter_ticks < LOITER_TICKS) {
-                    loiter_ticks++;
-                    mavlink_set_mode(COPTER_MODE_LOITER);   // keep sending so ArduPilot accepts
+                if (guided_ticks < GUIDED_TICKS) {
+                    guided_ticks++;
+                    mavlink_set_mode(COPTER_MODE_GUIDED);   // keep sending so ArduPilot accepts
                     mavlink_send_rc_override_4ch(STM32_SYSTEM_ID, STM32_COMPONENT_ID, 1500, 1500, THR_HOLD, 1500);
                 }
                 else {
-                    //printf("Mission: LOITER Failed. Landing...\n");
-                    loiter_ticks = 0;
+                    guided_ticks = 0;
 
                     g_vehicle_state.mission_state = 7;
 
@@ -1557,105 +1519,158 @@ void autonomous_mission_task(void *parameters) {
                 }
                 break;
             case MISSION_HOVER:
-                if ((is_voodoo_start) || (hover_ticks >= (hov_time * 1000.0f / MISSION_DT_MS))) {
+                if (hover_ticks >= (hov_time * 1000.0f / MISSION_DT_MS)) {
                     hover_ticks = 0;
-                    voodoo_ticks = 0;
+                    move_ticks = 0;
                     land_ticks = 0;
                     flow_bad_ticks = 0;
                     qual_bad_ticks = 0;  
+
+                    if (!is_origin_set) {
+                        center_n = g_vehicle_state.position_ned[0];
+                        center_e = g_vehicle_state.position_ned[1]; 
+                        center_d = g_vehicle_state.position_ned[2];
+                        is_origin_set = true;               
+                    }
+                    
+                    float dn = g_vehicle_state.position_ned[0] - center_n;
+                    float de = g_vehicle_state.position_ned[1] - center_e;                     
                     
                     g_vehicle_state.mission_state = 6;
 
-                    g_mission_state = VOODOO_CONTROL;
+                    g_mission_state = MISSION_MOVE_LEFT;
                 } else {
                     hover_ticks++;
                 }
                 break;
-            case VOODOO_CONTROL: {
-                if ((voodoo_ticks >= VOODOO_TICKS) || g_peer_land_requested) {
-                    voodoo_ticks = 0;
-                    land_ticks = 0;
-
+            case MISSION_MOVE_LEFT: {
+                float tar_e = center_e - 1.0f;
+                float cur_e = g_vehicle_state.position_ned[1];
+                mavlink_set_local_target(center_n, tar_e, center_d);
+                if (fabsf(cur_e - tar_e) <= 0.15f || move_ticks >= MOVE_TICKS) {
+                    move_ticks = 0;
+                    brake_ticks = 0;
                     g_vehicle_state.mission_state = 7;
-
-                    g_mission_state = MISSION_LOITER_LAND;
-                    break; // Exit the state immediately
-                }
-                if (!is_origin_set) {
-                    center_n = g_vehicle_state.position_ned[0];
-                    center_e = g_vehicle_state.position_ned[1];
-                    x_guard_active = false;
-                    y_guard_active = false;     
-                    is_origin_set = true;               
-                }
-                // --- SAFETY --- //
-                // Drift accumulation
-                float dn = g_vehicle_state.position_ned[0] - center_n;
-                float de = g_vehicle_state.position_ned[1] - center_e; 
-
-                // Leader timeout
-                if (xTaskGetTickCount() - g_peer_state.last_rx_tick > pdMS_TO_TICKS(VOODOO_TIMEOUT_MS)) {
-                    g_vehicle_state.mission_state = 7;
-                    g_mission_state = MISSION_COMMAND_LAND;
-                    break; // Exit the state immediately                    
-                }
-                if ((fabsf(dn) > BOX_SAFETY_M) || (fabsf(de) > BOX_SAFETY_M)) {
-                    g_vehicle_state.mission_state = 7;
-                    g_mission_state = MISSION_COMMAND_LAND;
-                    break; // Exit the state immediately                          
-                }      
-                // --- SAFETY --- // 
-
-                // Local copies of leader attitude for this loop
-                float peer_roll = g_peer_state.roll;
-                float peer_pitch = g_peer_state.pitch;
-
-                // --- Single-Action-Priority Logic ---
-                if (peer_pitch < -VOODOO_PITCH_THRESHOLD) {
-                    // Move Forward (Pitch stick forward is negative X)
-                    voodoo_ticks = 0;
-                    mavlink_send_rc_override_4ch(STM32_SYSTEM_ID, STM32_COMPONENT_ID, 1500, 1300, 1500, 1500);
-                }
-                else if (peer_pitch > VOODOO_PITCH_THRESHOLD) {
-                    // Move Backward (Pitch stick back is positive X)
-                    voodoo_ticks = 0;
-                    mavlink_send_rc_override_4ch(STM32_SYSTEM_ID, STM32_COMPONENT_ID, 1500, 1700, 1500, 1500);
-                }
-                else if (peer_roll > VOODOO_ROLL_THRESHOLD) {
-                    // Move Right (Roll stick right is positive Y)
-                    voodoo_ticks = 0;
-                    mavlink_send_rc_override_4ch(STM32_SYSTEM_ID, STM32_COMPONENT_ID, 1700, 1500, 1500, 1500);
-                }
-                else if (peer_roll < -VOODOO_ROLL_THRESHOLD) {
-                    // Move Left (Roll stick left is negative Y)
-                    voodoo_ticks = 0;
-                    mavlink_send_rc_override_4ch(STM32_SYSTEM_ID, STM32_COMPONENT_ID, 1300, 1500, 1500, 1500);
-                }
-                else {
-                    // No thresholds met, default to a stable hover
-                    voodoo_ticks++;
-                    mavlink_send_rc_override_4ch(STM32_SYSTEM_ID, STM32_COMPONENT_ID, 1500, 1500, 1500, 1500);
+                    g_mission_state = MISSION_BRAKE_1;
+                } else {
+                    move_ticks++;
                 }
                 break;
-            }                            
-            case MISSION_LOITER_LAND: {
-                uint16_t loiter_thr = (uint16_t)(1500 - (land_ticks * 500 / LOITER_LAND_TICKS));
+            }
+            case MISSION_BRAKE_1:
+                if (brake_ticks >= BRAKE_TICKS) {
+                    brake_ticks = 0;
+                    move_ticks = 0;
+                    g_vehicle_state.mission_state = 8;
+                    g_mission_state = MISSION_MOVE_BACKWARDS;
+                } else {
+                    brake_ticks++;
+                }
+                break;
+            case MISSION_MOVE_BACKWARDS: {
+                // Square corner 2: move south (−N), hold E at center_e − 1
+                float tar_n = center_n - 1.0f;
+                float cur_n = g_vehicle_state.position_ned[0];
+                mavlink_set_local_target(tar_n, center_e - 1.0f, center_d);
+                if (fabsf(cur_n - tar_n) <= 0.15f || move_ticks >= MOVE_TICKS) {
+                    move_ticks = 0;
+                    brake_ticks = 0;
+                    g_vehicle_state.mission_state = 9;
+                    g_mission_state = MISSION_BRAKE_2;
+                } else {
+                    move_ticks++;
+                }
+                break;
+            }
+            case MISSION_BRAKE_2:
+                if (brake_ticks >= BRAKE_TICKS) {
+                    brake_ticks = 0;
+                    move_ticks = 0;
+                    g_vehicle_state.mission_state = 10;
+                    g_mission_state = MISSION_MOVE_RIGHT;
+                } else {
+                    brake_ticks++;
+                }
+                break;
+            case MISSION_MOVE_RIGHT: {
+                // Square corner 3: move east back to center_e, hold N at center_n − 1
+                float tar_e = center_e;
+                float cur_e = g_vehicle_state.position_ned[1];
+                mavlink_set_local_target(center_n - 1.0f, tar_e, center_d);
+                if (fabsf(cur_e - tar_e) <= 0.15f || move_ticks >= MOVE_TICKS) {
+                    move_ticks = 0;
+                    brake_ticks = 0;
+                    g_vehicle_state.mission_state = 11;
+                    g_mission_state = MISSION_BRAKE_3;
+                } else {
+                    move_ticks++;
+                }
+                break;
+            }
+            case MISSION_BRAKE_3:
+                if (brake_ticks >= BRAKE_TICKS) {
+                    brake_ticks = 0;
+                    move_ticks = 0;
+                    g_vehicle_state.mission_state = 12;
+                    g_mission_state = MISSION_MOVE_FORWARD;
+                } else {
+                    brake_ticks++;
+                }
+                break;
+            case MISSION_MOVE_FORWARD: {
+                // Square corner 4: return north to center_n, hold E at center_e
+                float tar_n = center_n;
+                float cur_n = g_vehicle_state.position_ned[0];
+                mavlink_set_local_target(tar_n, center_e, center_d);
+                if (fabsf(cur_n - tar_n) <= 0.15f || move_ticks >= MOVE_TICKS) {
+                    move_ticks = 0;
+                    brake_ticks = 0;
+                    g_vehicle_state.mission_state = 13;
+                    g_mission_state = MISSION_BRAKE_4;
+                } else {
+                    move_ticks++;
+                }
+                break;
+            }
+            case MISSION_BRAKE_4:
+                if (brake_ticks >= BRAKE_TICKS) {
+                    brake_ticks = 0;
+                    move_ticks = 0;
+                    if (move_counter >= guid_loops) {
+                        move_counter = 0;
+                        land_ticks = 0;
+                        loop_counter++;
+                        g_vehicle_state.mission_state = 14;
+                        g_mission_state = MISSION_GUIDED_LAND;
+                    } else {
+                        move_counter++;
+                        g_vehicle_state.mission_state = 6;
+                        g_mission_state = MISSION_MOVE_LEFT;
+                    }
+                } else {
+                    brake_ticks++;
+                }
+                break;                                                                                                              
+            case MISSION_GUIDED_LAND: {
                 if (land_ticks == 0) {
-                    loop_counter++;
                     g_vehicle_state.mission_state = 8;
                 }
-                //if ((land_ticks >= LOITER_LAND_TICKS) || (g_vehicle_state.position_ned[2] > -2.0f * LAND_ALT)) {
-                if (land_ticks >= LOITER_LAND_TICKS) {
+                // Near ground: hand off to ArduPilot's LAND command for final touch-down
+                if (g_vehicle_state.position_ned[2] > -0.30f) {
+                    land_ticks = 0;
+                    g_mission_state = MISSION_COMMAND_LAND;
+                    break;
+                }
+                // Timeout fallback: force disarm
+                if (land_ticks >= GUIDED_LAND_TICKS) {
                     land_ticks = 0;
                     disarm_ticks = 0;
-                    //mavlink_send_rc_override_4ch(STM32_SYSTEM_ID, STM32_COMPONENT_ID, 1500, 1500, loiter_thr, 1500);
                     g_vehicle_state.mission_state = 9;
                     g_mission_state = MISSION_DISARM;
                     break;
                 }
-                // Ramp throttle 1500 → 1000 over LOITER_LAND_TICKS
-                if (loiter_thr < 1000) loiter_thr = 1000;
-                mavlink_send_rc_override_4ch(STM32_SYSTEM_ID, STM32_COMPONENT_ID, 1500, 1500, loiter_thr, 1500);
+                // Command a constant descent velocity; hold N/E at zero.
+                mavlink_set_local_vel_target(0.0f, 0.0f, GUIDED_LAND_RATE_MPS);
                 land_ticks++;
                 break;
             }
@@ -1664,7 +1679,7 @@ void autonomous_mission_task(void *parameters) {
 
                 land_ticks = 0;
 
-                g_vehicle_state.mission_state = 8;
+                g_vehicle_state.mission_state = 15;
 
                 loop_counter++;     // Count loops here as this case does not repeat
 
@@ -1677,7 +1692,7 @@ void autonomous_mission_task(void *parameters) {
                     land_ticks = 0;
                     disarm_ticks = 0;
 
-                    g_vehicle_state.mission_state = 9;
+                    g_vehicle_state.mission_state = 16;
 
                     //printf("Mission: Land Done. Disarming...\n");
                     g_mission_state = MISSION_DISARM;
@@ -1699,7 +1714,7 @@ void autonomous_mission_task(void *parameters) {
                 } else {
                     disarm_ticks++;
                 }
-                break;                               
+                break;                              
             case MISSION_DONE:
                 if (g_vehicle_state.mode == COPTER_MODE_STABILIZE) {
                     //printf("Mission state is being reset.\n");
@@ -1707,12 +1722,11 @@ void autonomous_mission_task(void *parameters) {
 
                     if (is_mission_reset) {
                         is_mission_reset = false; // <-- IMPORTANT: Clear the reset flag
-                        is_voodoo_start = false;
                         is_origin_set = false;
                         g_vehicle_state.mission_state = 0;
                         g_peer_land_requested = false;
                         // Go back to the very first state
-                        g_mission_state = MISSION_WAIT_FOR_COMMAND;                        
+                        g_mission_state = MISSION_WAIT_FOR_COMMAND;
                     } else {
                         is_mission_start = false; // <-- IMPORTANT: Clear the start flag
                     }
